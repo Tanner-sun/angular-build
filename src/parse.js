@@ -4,6 +4,55 @@ var _ = require('lodash');
 
 var ESCAPES = {'n':'\n', 'f':'\f', 'r':'\r', 't':'\t', 'v':'\v', '\'':'\'', '"':'"'};
 
+var CALL = Function.prototype.call;
+var APPLY = Function.prototype.apply;
+var BIND = Function.prototype.bind;
+
+function ensureSafeMemberName(name) {
+  if (name === 'constructor' || name === '__proto__' ||
+      name === '__defineGetter__' || name === '__defineSetter__' ||
+      name === '__lookupGetter__' || name === '__lookupSetter__') {
+    throw 'Attempting to access a disallowed field in Angular expressions!';
+  }
+}
+
+function ensureSafeObject(obj) {
+  if (obj) {
+    if (obj.window === window) {
+      throw 'Referencing window in Angular expressions is disallowed!';
+    } else if (obj.children &&
+                (obj.nodeName || (obj.prop && obj.attr && obj.find))) {
+      throw 'Referencing DOM nodes in Angular expressions is disallowed!';
+    } else if (obj.constructor === obj) {
+      throw 'Referencing Function in Angular expressions is disallowed!';
+    } else if (obj === Object) {
+      throw 'Referencing Object in Angular expressions is disallowed!';
+    }
+  }
+  return obj;
+}
+
+function ensureSafeFunction(obj) {
+  if (obj) {
+    if (obj.constructor === obj) {
+      throw 'Referencing Function in Angular expressions is disallowed!';
+    } else if (obj === CALL || obj === APPLY || obj === BIND) {
+      throw 'Referencing call, apply, or bind in Angular expressions ' +
+        'is disallowed!';
+    }
+  }
+  return obj;
+}
+
+function ifDefined(value, defaultValue) {
+  return typeof value === 'undefined' ? defaultValue : value;
+}
+
+var OPERATORS = {
+  '+': true,
+  '!': true
+}
+
 function Lexer() {
 }
 
@@ -26,7 +75,7 @@ Lexer.prototype.lex = function(text) {
     } else if (this.is('\'"')) {
       this.readString(this.ch);
     //遇到[],{}:.() 仅push进入到tokens  
-    } else if (this.is('[],{}:.()')) {
+    } else if (this.is('[],{}:.()=')) {
       this.tokens.push({
         text: this.ch
       });
@@ -36,7 +85,15 @@ Lexer.prototype.lex = function(text) {
     } else if (this.isWhitespace(this.ch)) {
       this.index++;
     } else {
-      throw 'Unexpected next character: ' + this.ch;
+      var op = OPERATORS[this.ch];
+      if (op) {
+        this.tokens.push({
+          text: this.ch
+        });
+        this.index++;
+      } else {
+        throw 'Unexpected next character: ' + this.ch;
+      }
     }
   }
 
@@ -172,6 +229,8 @@ AST.ThisExpression = 'ThisExpression';
 AST.MemberExpression = 'MemberExpression';
 AST.LocalsExpression = 'LocalsExpression';
 AST.CallExpression = 'CallExpression';
+AST.AssignmentExpression = 'AssignmentExpression';
+AST.UnaryExpression = 'UnaryExpression';
 
 
 AST.prototype.ast = function(text) {
@@ -180,8 +239,30 @@ AST.prototype.ast = function(text) {
   return this.program();
 };
 AST.prototype.program = function() {
-  return {type: AST.Program, body: this.primary()};
+  return {type: AST.Program, body: this.assignment()};
 };
+AST.prototype.assignment = function() {
+  var left = this.unary();
+  if (this.expect('=')){
+    var right = this.unary();
+    //注意left和right都是常见的tree Node节点
+    return {type: AST.AssignmentExpression, left: left, right: right};
+  }
+  return left;
+};
+AST.prototype.unary = function() {
+  var token;
+  if (token = this.expect('+','!')){
+    return {
+      type: AST.UnaryExpression,
+      operator: token.text,
+      argument: this.unary()
+    }
+  } else {
+    return this.primary()
+  }
+};
+
 //不断shift this.tokens数组，并对数组中的元素根据类型生成不同的tree node
 AST.prototype.primary = function() {
   var primary;
@@ -232,6 +313,7 @@ AST.prototype.primary = function() {
 
   return primary;
 };
+
 AST.prototype.arrayDeclaration = function() {
   var elements = [];
   if (!this.peek(']')) {
@@ -240,7 +322,7 @@ AST.prototype.arrayDeclaration = function() {
         break;
       }
       //对每个数组元素都需递归进行this.primary()处理。
-      elements.push(this.primary());
+      elements.push(this.assignment());
     } while (this.expect(','));
   }
   this.consume(']');
@@ -259,7 +341,7 @@ AST.prototype.object = function() {
       }
       this.consume(':');
       //value的primary处理
-      property.value = this.primary();
+      property.value = this.assignment();
       properties.push(property);
     } while (this.expect(','));
   }
@@ -299,7 +381,7 @@ AST.prototype.parseArguments = function() {
   var args = [];
   if (!this.peek(')')) {
     do{
-      args.push(this.primary());
+      args.push(this.assignment());
     }while(this.expect(','))
   }
   return args;
@@ -321,12 +403,23 @@ ASTCompiler.prototype.compile = function(text) {
   var ast = this.astBuilder.ast(text);
   this.state = {body: [],nextId: 0, vars: []};
   this.recurse(ast);
+  var fnString = 'var fn=function(s,l){' + (this.state.vars.length ? 'var ' + this.state.vars.join(',') + ';' :'') +
+    this.state.body.join('') +'}; return fn;';
   /* jshint -W054 */
-  return new Function('s','l',(this.state.vars.length ? 'var '+this.state.vars.join(',')+';' : '') + this.state.body.join(''));
+  return new Function(
+    'ensureSafeMemberName',
+    'ensureSafeObject',
+    'ensureSafeFunction',
+    'ifDefined',
+    fnString)(
+    ensureSafeMemberName,
+    ensureSafeObject,
+    ensureSafeFunction,
+    ifDefined);
   /* jshint +W054 */
 };
 //递归 不同的tree Node生成不同的表达式 以供new Function使用
-ASTCompiler.prototype.recurse = function(ast, context) {
+ASTCompiler.prototype.recurse = function(ast, context, create) {
   var intoId;
   switch (ast.type) {
     //根节点
@@ -354,16 +447,22 @@ ASTCompiler.prototype.recurse = function(ast, context) {
       return '{' + properties.join(',') + '}';
     //标识符  
     case AST.Identifier:
-        intoId = this.nextId();
-        this.if_(this.getHasOwnProperty('l', ast.name),
-          this.assign(intoId, this.nonComputedMember('l', ast.name)));
-        this.if_(this.not(this.getHasOwnProperty('l', ast.name)) + ' && s',
-          this.assign(intoId, this.nonComputedMember('s', ast.name)));
-        if (context) {
-          context.context = this.getHasOwnProperty('l',ast.name) + '?l:s';
-          context.name = ast.name;
-          context.computed = false;
-        }
+      ensureSafeMemberName(ast.name);
+      intoId = this.nextId();
+      this.if_(this.getHasOwnProperty('l', ast.name),
+        this.assign(intoId, this.nonComputedMember('l', ast.name)));
+      if (create) {
+        this.if_(this.not(this.getHasOwnProperty('l', ast.name)) + ' && s && ' + this.not(this.getHasOwnProperty('s', ast.name)),
+          this.assign(this.nonComputedMember('s', ast.name), '{}'))
+      }
+      this.if_(this.not(this.getHasOwnProperty('l', ast.name)) + ' && s',
+        this.assign(intoId, this.nonComputedMember('s', ast.name)));
+      if (context) {
+        context.context = this.getHasOwnProperty('l',ast.name) + '?l:s';
+        context.name = ast.name;
+        context.computed = false;
+      }
+      this.addEnsureSafeObject(intoId);
       return intoId;
     //this 
     case AST.ThisExpression:
@@ -371,21 +470,36 @@ ASTCompiler.prototype.recurse = function(ast, context) {
     //成员表达式  
     case AST.MemberExpression:
       intoId = this.nextId();
-      var left = this.recurse(ast.object);
+      var left = this.recurse(ast.object, undefined, true);
       if(context){
         context.context = left;
       }
+      //成员表达式
+      //1)需要计算 如a[b]类型
       if(ast.computed){
         var right = this.recurse(ast.property);
+        this.addEnsureSafeMemberName(right);
+        if(create){
+          this.if_(this.not(this.computedMember(left, right)),
+            this.assign(this.computedMember(left, right), '{}'))
+        }
         this.if_(left,
-          this.assign(intoId, this.computedMember(left, right)));
+          this.assign(intoId, 
+            'ensureSafeObject(' +this.computedMember(left, right)+ ')'));
         if(context){
           context.name = right;
           context.computed = true;
         }
+      //2)不需要计算 如a.b  
       }else{
+        ensureSafeMemberName(ast.property.name);
+        if(create){
+          this.if_(this.not(this.nonComputedMember(left, ast.property.name)),
+            this.assign(this.nonComputedMember(left, ast.property.name), '{}'))
+        }
         this.if_(left,
-          this.assign(intoId, this.nonComputedMember(left, ast.property.name)));
+          this.assign(intoId, 
+            'ensureSafeObject(' + this.nonComputedMember(left, ast.property.name) + ')'));
         if(context){
           context.name = ast.property.name;
           context.computed = false;
@@ -400,16 +514,31 @@ ASTCompiler.prototype.recurse = function(ast, context) {
       var callContext = {};
       var callee = this.recurse(ast.callee, callContext);
       var args = _.map(ast.arguments,_.bind(function(arg){
-        return this.recurse(arg);
+        return 'ensureSafeObject(' + this.recurse(arg) + ')';
       },this));
       if (callContext.name) {
+        this.addEnsureSafeObject(callContext.context);
         if (callContext.computed) {
           callee = this.computedMember(callContext.context,callContext.name);
         } else {
           callee = this.nonComputedMember(callContext.context,callContext.name);
         }
       }
-      return callee + '&&' + callee + '(' + args.join(',') +')';     
+      this.addEnsureSafeFunction(callee);
+      return callee + '&&ensureSafeObject(' + callee + '(' + args.join(',') + '))';
+    case AST.AssignmentExpression:
+      var leftContext = {};
+      this.recurse(ast.left, leftContext, true);
+      var leftExpr;
+      if (leftContext.computed) {
+        leftExpr = this.computedMember(leftContext.context, leftContext.name);
+      } else {
+        leftExpr = this.nonComputedMember(leftContext.context, leftContext.name);
+      }
+      return this.assign(leftExpr, 
+        'ensureSafeObject(' + this.recurse(ast.right) + ')');
+    case AST.UnaryExpression:
+      return ast.operator + '(' + this.ifDefined(this.recurse(ast.argument), 0) + ')'; 
   }
 };
 
@@ -453,8 +582,18 @@ ASTCompiler.prototype.not = function(e){
 ASTCompiler.prototype.getHasOwnProperty = function(object,property){
   return object + '&&(' + this.escape(property) + ' in ' + object + ')';
 };
-
-
+ASTCompiler.prototype.addEnsureSafeMemberName = function(expr) {
+  this.state.body.push('ensureSafeMemberName(' + expr + ');');
+};
+ASTCompiler.prototype.addEnsureSafeObject = function(expr) {
+  this.state.body.push('ensureSafeObject(' + expr + ');');
+};
+ASTCompiler.prototype.addEnsureSafeFunction = function(expr) {
+  this.state.body.push('ensureSafeFunction(' + expr + ');');
+};
+ASTCompiler.prototype.ifDefined = function(value, defaultValue) {
+  return 'ifDefined(' + value + ',' + defaultValue + ')';
+};
 
 function Parser(lexer) {
   this.lexer = lexer;
