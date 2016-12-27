@@ -50,7 +50,11 @@ function ifDefined(value, defaultValue) {
 
 var OPERATORS = {
   '+': true,
-  '!': true
+  '!': true,
+  '-': true,
+  '*': true,
+  '/': true,
+  '%': true
 }
 
 function Lexer() {
@@ -151,9 +155,11 @@ Lexer.prototype.readNumber = function() {
 Lexer.prototype.readString = function(quote) {
   this.index++;
   var string = '';
+  var rawString = quote;
   var escape = false;
   while (this.index < this.text.length) {
     var ch = this.text.charAt(this.index);
+    rawString += ch;
     if (escape) {
       if (ch === 'u') {
         var hex = this.text.substring(this.index + 1, this.index + 5);
@@ -174,7 +180,7 @@ Lexer.prototype.readString = function(quote) {
     } else if (ch === quote) {
       this.index++;
       this.tokens.push({
-        text: string,
+        text: rawString,
         value: string
       });
       return;
@@ -231,6 +237,7 @@ AST.LocalsExpression = 'LocalsExpression';
 AST.CallExpression = 'CallExpression';
 AST.AssignmentExpression = 'AssignmentExpression';
 AST.UnaryExpression = 'UnaryExpression';
+AST.BinaryExpression = 'BinaryExpression';
 
 
 AST.prototype.ast = function(text) {
@@ -242,17 +249,44 @@ AST.prototype.program = function() {
   return {type: AST.Program, body: this.assignment()};
 };
 AST.prototype.assignment = function() {
-  var left = this.unary();
+  var left = this.additive();
   if (this.expect('=')){
-    var right = this.unary();
+    var right = this.additive();
     //注意left和right都是常见的tree Node节点
     return {type: AST.AssignmentExpression, left: left, right: right};
   }
   return left;
 };
+AST.prototype.additive = function() {
+  var left = this.multiplicative();
+  var token;
+  while(token = this.expect('+','-')){
+    left = {
+      type: AST.BinaryExpression,
+      operator: token.text,
+      left: left,
+      right: this.multiplicative()
+    }    
+  }
+  return left;
+};
+AST.prototype.multiplicative = function() {
+  var left = this.unary();
+  var token;
+  while (token = this.expect('*','/','%')){
+    left = {
+      type: AST.BinaryExpression,
+      operator: token.text,
+      left: left,
+      right: this.unary()
+    }
+  }
+  return left;
+
+};
 AST.prototype.unary = function() {
   var token;
-  if (token = this.expect('+','!')){
+  if (token = this.expect('+','!','-')){
     return {
       type: AST.UnaryExpression,
       operator: token.text,
@@ -538,7 +572,14 @@ ASTCompiler.prototype.recurse = function(ast, context, create) {
       return this.assign(leftExpr, 
         'ensureSafeObject(' + this.recurse(ast.right) + ')');
     case AST.UnaryExpression:
-      return ast.operator + '(' + this.ifDefined(this.recurse(ast.argument), 0) + ')'; 
+      return ast.operator + '(' + this.ifDefined(this.recurse(ast.argument), 0) + ')';
+    case AST.BinaryExpression:
+      if (ast.operator === '+' || ast.operator === '-'){
+        return '(' + this.ifDefined(this.recurse(ast.left),0) + ')' + ast.operator + 
+          '(' + this.ifDefined(this.recurse(ast.right), 0) + ')';
+      } else {
+        return '(' + this.recurse(ast.left) + ')' + ast.operator + '(' + this.recurse(ast.right) + ')';  
+      }
   }
 };
 
