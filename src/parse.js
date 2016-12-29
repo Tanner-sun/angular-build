@@ -54,7 +54,18 @@ var OPERATORS = {
   '-': true,
   '*': true,
   '/': true,
-  '%': true
+  '%': true,
+  '=': true,
+  '==': true,
+  '!=': true,
+  '!==': true,
+  '===': true,
+  '<': true,
+  '>': true,
+  '<=': true,
+  '>=': true,
+  '&&': true,
+  '||': true
 }
 
 function Lexer() {
@@ -79,7 +90,7 @@ Lexer.prototype.lex = function(text) {
     } else if (this.is('\'"')) {
       this.readString(this.ch);
     //遇到[],{}:.() 仅push进入到tokens  
-    } else if (this.is('[],{}:.()=')) {
+    } else if (this.is('[],{}:.()?;')) {
       this.tokens.push({
         text: this.ch
       });
@@ -89,12 +100,19 @@ Lexer.prototype.lex = function(text) {
     } else if (this.isWhitespace(this.ch)) {
       this.index++;
     } else {
-      var op = OPERATORS[this.ch];
-      if (op) {
+      var ch = this.ch;
+      var ch1 = this.ch + this.peek();
+      var ch2 = this.ch + this.peek() + this.peek(2);
+      var op = OPERATORS[ch];
+      var op1 = OPERATORS[ch1];
+      var op2 = OPERATORS[ch2];
+
+      if (ch || ch1 || ch2) {
+        var token = op2 ? ch2 : (op1 ? ch1 : ch);
         this.tokens.push({
-          text: this.ch
+          text: token
         });
-        this.index++;
+        this.index += token.length;
       } else {
         throw 'Unexpected next character: ' + this.ch;
       }
@@ -213,9 +231,10 @@ Lexer.prototype.readIdent = function() {
   this.tokens.push(token);
 };
 
-Lexer.prototype.peek = function() {
-  return this.index < this.text.length - 1 ?
-    this.text.charAt(this.index + 1) :
+Lexer.prototype.peek = function(n) {
+  var n = n || 1;
+  return this.index + n< this.text.length ?
+    this.text.charAt(this.index + n) :
     false;
 };
 
@@ -238,7 +257,8 @@ AST.CallExpression = 'CallExpression';
 AST.AssignmentExpression = 'AssignmentExpression';
 AST.UnaryExpression = 'UnaryExpression';
 AST.BinaryExpression = 'BinaryExpression';
-
+AST.LogicalExpression = 'LogicalExpression';
+AST.ConditionalExpression = 'ConditionalExpression';
 
 AST.prototype.ast = function(text) {
   //tokens添加到AST对象上去
@@ -246,14 +266,95 @@ AST.prototype.ast = function(text) {
   return this.program();
 };
 AST.prototype.program = function() {
-  return {type: AST.Program, body: this.assignment()};
+  var body = [];
+  while (true) {
+    if (this.tokens.length) {
+      body.push(this.assignment());
+    }
+    if (!this.expect(';')) {
+      return {type: AST.Program, body: body};
+    }
+  }
 };
 AST.prototype.assignment = function() {
-  var left = this.additive();
+  var left = this.ternary();
   if (this.expect('=')){
-    var right = this.additive();
+    var right = this.ternary();
     //注意left和right都是常见的tree Node节点
     return {type: AST.AssignmentExpression, left: left, right: right};
+  }
+  return left;
+};
+AST.prototype.ternary = function() {
+  var test = this.logicalOR();
+  if (this.expect('?')) {
+    var consequent = this.assignment();
+    if (this.consume(':')) {
+      var alternate = this.assignment();
+      return {
+        type: AST.ConditionalExpression, 
+        test: test,
+        consequent: consequent, 
+        alternate: alternate
+      };
+    }
+  }
+  return test;
+};
+
+AST.prototype.logicalOR = function() {
+  var left = this.logicalAND();
+  var token;
+  if (token = this.expect('||')){
+    //注意left和right都是常见的tree Node节点
+    left = {
+      type: AST.LogicalExpression, 
+      operator: token.text,
+      left: left, 
+      right: this.logicalAND()
+    };
+  }
+  return left;
+};
+AST.prototype.logicalAND = function() {
+  var left = this.equality();
+  var token;
+  if (token = this.expect('&&')){
+    //注意left和right都是常见的tree Node节点
+    left = {
+      type: AST.LogicalExpression, 
+      operator: token.text,
+      left: left, 
+      right: this.equality()
+    };
+  }
+  return left;
+};
+AST.prototype.equality = function() {
+  var left = this.relational();
+  var token;
+  if (token = this.expect('==','!=','===','!==')){
+    //注意left和right都是常见的tree Node节点
+    left = {
+      type: AST.BinaryExpression, 
+      operator: token.text,
+      left: left, 
+      right: this.relational()
+    };
+  }
+  return left;
+};
+AST.prototype.relational = function() {
+  var left = this.additive();
+  var token;
+  if (token = this.expect('<','>','<=','>=')){
+    //注意left和right都是常见的tree Node节点
+    left = {
+      type: AST.BinaryExpression, 
+      operator: token.text,
+      left: left, 
+      right: this.additive()
+    };
   }
   return left;
 };
@@ -300,7 +401,10 @@ AST.prototype.unary = function() {
 //不断shift this.tokens数组，并对数组中的元素根据类型生成不同的tree node
 AST.prototype.primary = function() {
   var primary;
-  if (this.expect('[')) {
+  if (this.expect('(')) {
+    primary = this.assignment();
+    this.consume(')');
+  } else if (this.expect('[')) {
     primary = this.arrayDeclaration();
   } else if (this.expect('{')) {
     primary = this.object();
@@ -458,7 +562,10 @@ ASTCompiler.prototype.recurse = function(ast, context, create) {
   switch (ast.type) {
     //根节点
     case AST.Program:
-      this.state.body.push('return ', this.recurse(ast.body), ';');
+      _.forEach(_.initial(ast.body), function(stmt){
+        this.state.body.push(this.recurse(stmt) + '');
+      })
+      this.state.body.push('return ', this.recurse(_.last(ast.body)), ';');
       break;
     //字面量  
     case AST.Literal:
@@ -580,6 +687,19 @@ ASTCompiler.prototype.recurse = function(ast, context, create) {
       } else {
         return '(' + this.recurse(ast.left) + ')' + ast.operator + '(' + this.recurse(ast.right) + ')';  
       }
+    case AST.LogicalExpression:
+      intoId = this.nextId();
+      this.state.body.push(this.assign(intoId, this.recurse(ast.left)));
+      this.if_(ast.operator === '&&' ? intoId : this.not(intoId), 
+        this.assign(intoId, this.recurse(ast.right)));
+      return intoId;
+    case AST.ConditionalExpression:
+      intoId = this.nextId();
+      var testId = this.nextId();
+      this.state.body.push(this.assign(testId, this.recurse(ast.test)));
+      this.if_(testId, this.assign(intoId, this.recurse(ast.consequent)));
+      this.if_(this.not(testId), this.assign(intoId, this.recurse(ast.alternate)));
+      return intoId;
   }
 };
 
