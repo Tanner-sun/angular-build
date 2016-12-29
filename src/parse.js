@@ -65,7 +65,8 @@ var OPERATORS = {
   '<=': true,
   '>=': true,
   '&&': true,
-  '||': true
+  '||': true,
+  '|': true
 }
 
 function Lexer() {
@@ -269,19 +270,35 @@ AST.prototype.program = function() {
   var body = [];
   while (true) {
     if (this.tokens.length) {
-      body.push(this.assignment());
+      body.push(this.filter());
     }
     if (!this.expect(';')) {
       return {type: AST.Program, body: body};
     }
   }
 };
+AST.prototype.filter = function() {
+  var left = this.assignment();
+  if (this.expect('|')) {
+    return {
+      type: AST.AST.CallExpression,
+      callee: this.identifier(),
+      argument: [left],
+      filter: true
+    }
+  }
+  return left;
+};
 AST.prototype.assignment = function() {
   var left = this.ternary();
   if (this.expect('=')){
     var right = this.ternary();
     //注意left和right都是常见的tree Node节点
-    return {type: AST.AssignmentExpression, left: left, right: right};
+    return {
+      type: AST.AssignmentExpression, 
+      left: left, 
+      right: right
+    };
   }
   return left;
 };
@@ -402,7 +419,7 @@ AST.prototype.unary = function() {
 AST.prototype.primary = function() {
   var primary;
   if (this.expect('(')) {
-    primary = this.assignment();
+    primary = this.filter();
     this.consume(')');
   } else if (this.expect('[')) {
     primary = this.arrayDeclaration();
@@ -539,7 +556,11 @@ function ASTCompiler(astBuilder) {
 
 ASTCompiler.prototype.compile = function(text) {
   var ast = this.astBuilder.ast(text);
-  this.state = {body: [],nextId: 0, vars: []};
+  this.state = {
+    body: [],
+    nextId: 0, 
+    vars: []
+  };
   this.recurse(ast);
   var fnString = 'var fn=function(s,l){' + (this.state.vars.length ? 'var ' + this.state.vars.join(',') + ';' :'') +
     this.state.body.join('') +'}; return fn;';
@@ -650,23 +671,29 @@ ASTCompiler.prototype.recurse = function(ast, context, create) {
     //$Locals  
     case AST.LocalsExpression:
       return 'l';
-    //函数调用  
+    //函数调用 | filter也如此 
     case AST.CallExpression:
-      var callContext = {};
-      var callee = this.recurse(ast.callee, callContext);
-      var args = _.map(ast.arguments,_.bind(function(arg){
-        return 'ensureSafeObject(' + this.recurse(arg) + ')';
-      },this));
-      if (callContext.name) {
-        this.addEnsureSafeObject(callContext.context);
-        if (callContext.computed) {
-          callee = this.computedMember(callContext.context,callContext.name);
-        } else {
-          callee = this.nonComputedMember(callContext.context,callContext.name);
+      var callContext,callee,args;
+      if (ast.filter) {
+
+      } else {
+        callContext = {};
+        callee = this.recurse(ast.callee, callContext);
+        args = _.map(ast.arguments,_.bind(function(arg){
+          return 'ensureSafeObject(' + this.recurse(arg) + ')';
+        },this));
+        if (callContext.name) {
+          this.addEnsureSafeObject(callContext.context);
+          if (callContext.computed) {
+            callee = this.computedMember(callContext.context,callContext.name);
+          } else {
+            callee = this.nonComputedMember(callContext.context,callContext.name);
+          }
         }
+        this.addEnsureSafeFunction(callee);
+        return callee + '&&ensureSafeObject(' + callee + '(' + args.join(',') + '))';
       }
-      this.addEnsureSafeFunction(callee);
-      return callee + '&&ensureSafeObject(' + callee + '(' + args.join(',') + '))';
+      break;
     case AST.AssignmentExpression:
       var leftContext = {};
       this.recurse(ast.left, leftContext, true);
