@@ -281,7 +281,7 @@ AST.prototype.filter = function() {
   var left = this.assignment();
   if (this.expect('|')) {
     return {
-      type: AST.AST.CallExpression,
+      type: AST.CallExpression,
       callee: this.identifier(),
       argument: [left],
       filter: true
@@ -675,6 +675,10 @@ ASTCompiler.prototype.recurse = function(ast, context, create) {
     case AST.CallExpression:
       var callContext,callee,args;
       if (ast.filter) {
+        callee = this.filter(ast.callee.name);
+        args = _.map(ast.arguments, _.bind(function(arg){
+          return this.re
+        }, this))
 
       } else {
         callContext = {};
