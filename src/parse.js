@@ -1,6 +1,7 @@
 'use strict';
 
 var _ = require('lodash');
+var filter = require('./filter').filter;
 
 var ESCAPES = {'n':'\n', 'f':'\f', 'r':'\r', 't':'\t', 'v':'\v', '\'':'\'', '"':'"'};
 
@@ -279,12 +280,16 @@ AST.prototype.program = function() {
 };
 AST.prototype.filter = function() {
   var left = this.assignment();
-  if (this.expect('|')) {
-    return {
+  while (this.expect('|')) {
+    var args = [left];
+    left = {
       type: AST.AST.CallExpression,
       callee: this.identifier(),
-      argument: [left],
+      argument: args,
       filter: true
+    }
+    while (this.expect(':')) {
+      args.push(this.assignment());
     }
   }
   return left;
@@ -559,10 +564,11 @@ ASTCompiler.prototype.compile = function(text) {
   this.state = {
     body: [],
     nextId: 0, 
-    vars: []
+    vars: [],
+    filters: {}
   };
   this.recurse(ast);
-  var fnString = 'var fn=function(s,l){' + (this.state.vars.length ? 'var ' + this.state.vars.join(',') + ';' :'') +
+  var fnString = this.filterPrefix() + ' var fn=function(s,l){' + (this.state.vars.length ? 'var ' + this.state.vars.join(',') + ';' :'') +
     this.state.body.join('') +'}; return fn;';
   /* jshint -W054 */
   return new Function(
@@ -570,11 +576,13 @@ ASTCompiler.prototype.compile = function(text) {
     'ensureSafeObject',
     'ensureSafeFunction',
     'ifDefined',
+    'filter',
     fnString)(
     ensureSafeMemberName,
     ensureSafeObject,
     ensureSafeFunction,
-    ifDefined);
+    ifDefined,
+    filter);
   /* jshint +W054 */
 };
 //递归 不同的tree Node生成不同的表达式 以供new Function使用
@@ -674,8 +682,14 @@ ASTCompiler.prototype.recurse = function(ast, context, create) {
     //函数调用 | filter也如此 
     case AST.CallExpression:
       var callContext,callee,args;
+      //filter的函数处理不用一定挂载到$scope上的函数，用filter字段区分
       if (ast.filter) {
-
+        //此处filter为AST.complier的，不是AST的。
+        callee = this.filter(ast.callee.name);
+        args = _.map(ast.arguments, _.bind(function(arg){
+          this.recurse(arg);
+        }, this));
+        return callee + '(' + args + ')';
       } else {
         callContext = {};
         callee = this.recurse(ast.callee, callContext);
@@ -760,8 +774,12 @@ ASTCompiler.prototype.assign = function(id, value){
   return id + '=' + value + ';';
 };
 //生成nextId；
-ASTCompiler.prototype.nextId = function(){
-  return 'v' + (this.state.nextId++);
+ASTCompiler.prototype.nextId = function(skip){
+  var id = 'v' + (this.state.nextId++);
+  if (!skip) {
+    this.state.vars.push(id);
+  }
+  return id;
 };
 ASTCompiler.prototype.not = function(e){
   return '!(' + e + ')';
@@ -781,6 +799,22 @@ ASTCompiler.prototype.addEnsureSafeFunction = function(expr) {
 };
 ASTCompiler.prototype.ifDefined = function(value, defaultValue) {
   return 'ifDefined(' + value + ',' + defaultValue + ')';
+};
+ASTCompiler.prototype.filter = function(name) {
+  if (!this.state.filters.hasOwnProperty(name)) {
+    return this.state.filters[name] = this.nextId(true);
+  }
+  return this.state.filters[name];
+};
+ASTCompiler.prototype.filterPrefix = function() {
+  if (!_.isEmpty(this.state.filters)) {
+    return '';
+  } else {
+    var parts = _.map(this.state.filters, _.bind(function(varName, filterName){
+      return varName + '= filter(' + filterName + ')';
+    },this))
+    return 'var' + parts.join(',') + ';'
+  }
 };
 
 function Parser(lexer) {
