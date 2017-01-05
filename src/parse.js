@@ -49,6 +49,14 @@ function ifDefined(value, defaultValue) {
   return typeof value === 'undefined' ? defaultValue : value;
 }
 
+function isLiteral(ast){
+  return ast.body.length ===0 || 
+        ast.body.length === 1 && (
+          ast.body.type === AST.Literal||
+          ast.body.type === AST.ArrayExpression||
+          ast.body.type === AST.ObjectExpression);
+}
+
 var OPERATORS = {
   '+': true,
   '!': true,
@@ -571,7 +579,7 @@ ASTCompiler.prototype.compile = function(text) {
   var fnString = this.filterPrefix() + ' var fn=function(s,l){' + (this.state.vars.length ? 'var ' + this.state.vars.join(',') + ';' :'') +
     this.state.body.join('') +'}; return fn;';
   /* jshint -W054 */
-  return new Function(
+  var fn = new Function(
     'ensureSafeMemberName',
     'ensureSafeObject',
     'ensureSafeFunction',
@@ -584,6 +592,8 @@ ASTCompiler.prototype.compile = function(text) {
     ifDefined,
     filter);
   /* jshint +W054 */
+  fn.literal = isLiteral(ast)
+  return fn;
 };
 //递归 不同的tree Node生成不同的表达式 以供new Function使用
 ASTCompiler.prototype.recurse = function(ast, context, create) {
@@ -829,6 +839,9 @@ Parser.prototype.parse = function(text) {
 
 
 function parse(expr) {
+  if (typeof expr === "function"){
+    return expr;
+  }
   var lexer = new Lexer();
   var parser = new Parser(lexer);
   return parser.parse(expr);
