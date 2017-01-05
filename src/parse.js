@@ -283,9 +283,9 @@ AST.prototype.filter = function() {
   while (this.expect('|')) {
     var args = [left];
     left = {
-      type: AST.AST.CallExpression,
+      type: AST.CallExpression,
       callee: this.identifier(),
-      argument: args,
+      arguments: args,
       filter: true
     }
     while (this.expect(':')) {
@@ -687,7 +687,7 @@ ASTCompiler.prototype.recurse = function(ast, context, create) {
         //此处filter为AST.complier的，不是AST的。
         callee = this.filter(ast.callee.name);
         args = _.map(ast.arguments, _.bind(function(arg){
-          this.recurse(arg);
+          return this.recurse(arg);
         }, this));
         return callee + '(' + args + ')';
       } else {
@@ -807,13 +807,13 @@ ASTCompiler.prototype.filter = function(name) {
   return this.state.filters[name];
 };
 ASTCompiler.prototype.filterPrefix = function() {
-  if (!_.isEmpty(this.state.filters)) {
+  if (_.isEmpty(this.state.filters)) {
     return '';
   } else {
     var parts = _.map(this.state.filters, _.bind(function(varName, filterName){
-      return varName + '= filter(' + filterName + ')';
+      return varName + '= filter(\'' + filterName + '\')';
     },this))
-    return 'var' + parts.join(',') + ';'
+    return 'var ' + parts.join(',') + ';'
   }
 };
 
