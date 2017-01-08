@@ -18,8 +18,13 @@ function initWatchVal(){
 }
 Scope.prototype.$watch = function(watchFn,listenerFn,valueEq){
 	var self = this;
+	watchFn = parse(watchFn);
+	// 表达式的watch代理
+	if (watchFn.$$watchDelegate) {
+		return watchFn.$$watchDelegate(self, listenerFn, valueEq, watchFn);
+	}
 	var watcher = {
-		watchFn: parse(watchFn),
+		watchFn: watchFn,
 		listenerFn: listenerFn || function() { },
 		valueEq: !!valueEq,
 		last: initWatchVal

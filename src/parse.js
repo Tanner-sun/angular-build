@@ -49,13 +49,6 @@ function ifDefined(value, defaultValue) {
   return typeof value === 'undefined' ? defaultValue : value;
 }
 
-function isLiteral(ast){
-  return ast.body.length ===0 || 
-        ast.body.length === 1 && (
-          ast.body.type === AST.Literal||
-          ast.body.type === AST.ArrayExpression||
-          ast.body.type === AST.ObjectExpression);
-}
 
 var OPERATORS = {
   '+': true,
@@ -569,15 +562,25 @@ function ASTCompiler(astBuilder) {
 
 ASTCompiler.prototype.compile = function(text) {
   var ast = this.astBuilder.ast(text);
+  markConstantAndWatchExpressions(ast);
   this.state = {
-    body: [],
     nextId: 0, 
-    vars: [],
-    filters: {}
+    fn: {body: [],vars: []},
+    filters: {},
+    inputs: []
   };
+  this.stage = 'inputs'; 
+  _.forEach(getInputs(ast.body), _.bind(function(input, idx){
+    var inputKey = 'fn' + idx;
+    this.state[inputKey] = {body: [], vars: []};
+    this.state.computing = inputKey;
+    this.state[inputKey].body.push('return ' + this.recurse(input) + ';');
+  },this))
+  this.stage = 'main'; 
+  this.state.computing = 'fn'
   this.recurse(ast);
-  var fnString = this.filterPrefix() + ' var fn=function(s,l){' + (this.state.vars.length ? 'var ' + this.state.vars.join(',') + ';' :'') +
-    this.state.body.join('') +'}; return fn;';
+  var fnString = this.filterPrefix() + ' var fn=function(s,l){' + (this.state.fn.vars.length ? 'var ' + this.state.fn.vars.join(',') + ';' :'') +
+    this.state.fn.body.join('') +'};'+ this.watchFns() +' return fn;';
   /* jshint -W054 */
   var fn = new Function(
     'ensureSafeMemberName',
@@ -592,7 +595,8 @@ ASTCompiler.prototype.compile = function(text) {
     ifDefined,
     filter);
   /* jshint +W054 */
-  fn.literal = isLiteral(ast)
+  fn.literal = isLiteral(ast);
+  fn.constant = ast.constant;
   return fn;
 };
 //递归 不同的tree Node生成不同的表达式 以供new Function使用
@@ -601,10 +605,11 @@ ASTCompiler.prototype.recurse = function(ast, context, create) {
   switch (ast.type) {
     //根节点
     case AST.Program:
+      //处理逗号操作符
       _.forEach(_.initial(ast.body), function(stmt){
-        this.state.body.push(this.recurse(stmt) + '');
+        this.state[this.state.computing].body.push(this.recurse(stmt) + '');
       })
-      this.state.body.push('return ', this.recurse(_.last(ast.body)), ';');
+      this.state[this.state.computing].body.push('return ', this.recurse(_.last(ast.body)), ';');
       break;
     //字面量  
     case AST.Literal:
@@ -629,16 +634,22 @@ ASTCompiler.prototype.recurse = function(ast, context, create) {
     case AST.Identifier:
       ensureSafeMemberName(ast.name);
       intoId = this.nextId();
-      this.if_(this.getHasOwnProperty('l', ast.name),
+      var localsCheck; 
+      if (this.stage === 'inputs') { 
+        localsCheck = 'false'; 
+      } else { 
+        localsCheck = this.getHasOwnProperty('l', ast.name); 
+      }
+      this.if_(localsCheck,
         this.assign(intoId, this.nonComputedMember('l', ast.name)));
       if (create) {
-        this.if_(this.not(this.getHasOwnProperty('l', ast.name)) + ' && s && ' + this.not(this.getHasOwnProperty('s', ast.name)),
+        this.if_(this.not(localsCheck) + ' && s && ' + this.not(this.getHasOwnProperty('s', ast.name)),
           this.assign(this.nonComputedMember('s', ast.name), '{}'))
       }
-      this.if_(this.not(this.getHasOwnProperty('l', ast.name)) + ' && s',
+      this.if_(this.not(localsCheck) + ' && s',
         this.assign(intoId, this.nonComputedMember('s', ast.name)));
       if (context) {
-        context.context = this.getHasOwnProperty('l',ast.name) + '?l:s';
+        context.context = localsCheck + '?l:s';
         context.name = ast.name;
         context.computed = false;
       }
@@ -740,14 +751,14 @@ ASTCompiler.prototype.recurse = function(ast, context, create) {
       }
     case AST.LogicalExpression:
       intoId = this.nextId();
-      this.state.body.push(this.assign(intoId, this.recurse(ast.left)));
+      this.state[this.state.computing].body.push(this.assign(intoId, this.recurse(ast.left)));
       this.if_(ast.operator === '&&' ? intoId : this.not(intoId), 
         this.assign(intoId, this.recurse(ast.right)));
       return intoId;
     case AST.ConditionalExpression:
       intoId = this.nextId();
       var testId = this.nextId();
-      this.state.body.push(this.assign(testId, this.recurse(ast.test)));
+      this.state[this.state.computing].body.push(this.assign(testId, this.recurse(ast.test)));
       this.if_(testId, this.assign(intoId, this.recurse(ast.consequent)));
       this.if_(this.not(testId), this.assign(intoId, this.recurse(ast.alternate)));
       return intoId;
@@ -767,7 +778,7 @@ ASTCompiler.prototype.escape = function(value) {
     return value;
   }
 };
-//计算a.b
+//计算a.b 也是 scope.key的实现
 ASTCompiler.prototype.nonComputedMember = function(left, right){
   return '(' + left + ').' + right;
 };
@@ -777,7 +788,7 @@ ASTCompiler.prototype.computedMember = function(left, right){
 
 //生成if语句，并push到body中
 ASTCompiler.prototype.if_ = function(test, consequent){
-  this.state.body.push('if ('  , test , ')' + '{' , consequent , '}');
+  this.state[this.state.computing].body.push('if ('  , test , ')' + '{' , consequent , '}');
 };
 //生成id = value；
 ASTCompiler.prototype.assign = function(id, value){
@@ -787,7 +798,7 @@ ASTCompiler.prototype.assign = function(id, value){
 ASTCompiler.prototype.nextId = function(skip){
   var id = 'v' + (this.state.nextId++);
   if (!skip) {
-    this.state.vars.push(id);
+    this.state[this.state.computing].vars.push(id);
   }
   return id;
 };
@@ -799,13 +810,13 @@ ASTCompiler.prototype.getHasOwnProperty = function(object,property){
   return object + '&&(' + this.escape(property) + ' in ' + object + ')';
 };
 ASTCompiler.prototype.addEnsureSafeMemberName = function(expr) {
-  this.state.body.push('ensureSafeMemberName(' + expr + ');');
+  this.state[this.state.computing].body.push('ensureSafeMemberName(' + expr + ');');
 };
 ASTCompiler.prototype.addEnsureSafeObject = function(expr) {
-  this.state.body.push('ensureSafeObject(' + expr + ');');
+  this.state[this.state.computing].body.push('ensureSafeObject(' + expr + ');');
 };
 ASTCompiler.prototype.addEnsureSafeFunction = function(expr) {
-  this.state.body.push('ensureSafeFunction(' + expr + ');');
+  this.state[this.state.computing].body.push('ensureSafeFunction(' + expr + ');');
 };
 ASTCompiler.prototype.ifDefined = function(value, defaultValue) {
   return 'ifDefined(' + value + ',' + defaultValue + ')';
@@ -826,6 +837,241 @@ ASTCompiler.prototype.filterPrefix = function() {
     return 'var ' + parts.join(',') + ';'
   }
 };
+ASTCompiler.prototype.watchFns = function() {
+  var result = [];
+  _.forEach(this.state.inputs, _.bind(function(inputName) {
+    result.push('var ', inputName, '=function(s) {', 
+      (this.state[inputName].vars.length ? 
+        'var ' + this.state[inputName].vars.join(',') + ';' : 
+        ''
+      ), 
+      this.state[inputName].body.join(''), 
+    '};'); 
+  }, this));
+  if (result.length) { 
+    result.push('fn.inputs = [', this.state.inputs.join(','), '];'); 
+  }
+  return result.join('');
+};
+
+//判断是否是字面量表达式
+function isLiteral(ast){
+  return ast.body.length ===0 || 
+        ast.body.length === 1 && (
+          ast.body[0].type === AST.Literal||
+          ast.body[0].type === AST.ArrayExpression||
+          ast.body[0].type === AST.ObjectExpression);
+}
+//设置常量表达式
+function markConstantAndWatchExpressions(ast){
+  var allConstants;
+  var argsToWatch;
+  switch (ast.type) {
+    case AST.Program:
+      allConstants = true;
+      _.forEach(ast.body, function(expr){
+        markConstantAndWatchExpressions(expr);
+        allConstants = allConstants && expr.constant;
+      });
+      ast.constant = allConstants;
+      break;
+    case AST.Literal:
+      ast.constant = true;
+      ast.toWatch = [];
+      break;
+    case AST.Identifier:
+      ast.constant = false;
+      ast.toWatch = [ast];
+      break;
+    case AST.ArrayExpression:
+      allConstants = true;
+      argsToWatch = [];
+      _.forEach(ast.elements, function(element){
+        markConstantAndWatchExpressions(element);
+        allConstants = allConstants && element.constant;
+        if (!element.constant) {
+          argsToWatch.push.apply(argsToWatch, element.toWatch);
+        }
+      });
+      ast.constant = allConstants;
+      ast.toWatch = argsToWatch;
+      break;
+    case AST.ObjectExpression:
+      allConstants = true;
+      argsToWatch = [];
+      _.forEach(ast.properties, function(property){
+        markConstantAndWatchExpressions(property.value);
+        allConstants = allConstants && property.value.constant;
+        if (!property.value.constant) {
+          argsToWatch.push.apply(argsToWatch, property.value.toWatch);
+        }
+      })
+      ast.constant = allConstants;
+      ast.toWatch = argsToWatch;
+      break;
+    case AST.ThisExpression:
+    case AST.LocalsExpression:
+      ast.constant = false;
+      ast.toWatch = [];
+      break;
+    case AST.MemberExpression:
+      markConstantAndWatchExpressions(ast.object);
+      if (ast.computed) {
+        markConstantAndWatchExpressions(ast.property);
+      }
+      ast.constant = ast.object.constant && (!ast.computed || ast.property.constant);
+      ast.toWatch = [ast];
+      break;
+    case AST.CallExpression:
+      allConstants = ast.filter ? true : false;
+      argsToWatch = [];
+      _.forEach(ast.arguments, function(arg){
+        markConstantAndWatchExpressions(arg);
+        allConstants = allConstants && arg.constant;
+        if (!arg.constant) {
+          argsToWatch.push.apply(argsToWatch, arg.toWatch);
+        }
+      })
+      ast.constant = allConstants;
+      ast.toWatch = ast.filter ? argsToWatch : [ast];
+      break;
+    case AST.AssignmentExpression:
+      markConstantAndWatchExpressions(ast.left);
+      markConstantAndWatchExpressions(ast.right);
+      ast.constant = ast.left.constant && ast.right.constant;
+      ast.toWatch = [ast];
+      break;
+    case AST.UnaryExpression:
+      markConstantAndWatchExpressions(ast.argument);
+      ast.constant = ast.argument.constant;
+      ast.toWatch = ast.argument.toWatch;
+      break;
+    case AST.BinaryExpression:
+      markConstantAndWatchExpressions(ast.left);
+      markConstantAndWatchExpressions(ast.right);
+      ast.constant = ast.left.constant && ast.right.constant;
+      ast.toWatch = ast.left.toWatch.concat(ast.right.toWatch);
+      break;
+    case AST.LogicalExpression:
+      markConstantAndWatchExpressions(ast.left);
+      markConstantAndWatchExpressions(ast.right);
+      ast.constant = ast.left.constant && ast.right.constant;
+      ast.toWatch = [ast];
+      break;
+    case AST.ConditionalExpression:
+      markConstantAndWatchExpressions(ast.test);
+      markConstantAndWatchExpressions(ast.consequent);
+      markConstantAndWatchExpressions(ast.alternate);
+      ast.constant = ast.test.constant && ast.consequent.constant && ast.alternate.constant;
+      ast.toWatch = [ast];
+      break;                     
+  }
+}
+//构建常量表达式的watch代理函数
+function constantWatchDelegate(scope, listenerFn, valueEq, watchFn){
+  var unwatch = scope.$watch(
+    function(){
+      return watchFn(scope);
+    },
+    function(newValue, oldValue, scope){
+      if (_.isFunction(listenerFn)){
+        listenerFn.apply(this, arguments);
+      }
+      unwatch();
+    },
+    valueEq
+    );
+  return unwatch;
+}
+//构建一次绑定的watch代理函数
+function oneTimeWatchDelegate(scope, listenerFn, valueEq, watchFn){
+  var lastValue;
+  var unwatch = scope.$watch(
+    function(){
+      return watchFn(scope);
+    }, function(newValue, oldValue, scope){
+      lastValue = newValue;
+      if (_.isFunction(listenerFn)){
+        listenerFn.apply(this, arguments);
+      }
+      //下面的newValue是经过listenFn执行后的newValue
+      if (!_.isUndefined(newValue)) {
+        scope.$$postDigest(function(){
+          if (!_.isUndefined(lastValue)) {
+            unwatch();
+          }
+        })
+      }
+    }, valueEq
+  );
+  return unwatch;
+}
+//针对数组和对象构建一次绑定的watch代理函数
+function oneTimeLiteralWatchDelegate(scope, listenerFn, valueEq, watchFn){
+  function isAllDefined(val) {
+    return !_.some(val, _.isUndefined);
+  }
+
+  var unwatch = scope.$watch(
+    function(){
+      return watchFn(scope);
+    },
+    function(newValue, oldValue, scope){
+      if (_.isFunction(listenerFn)){
+        listenerFn.apply(this, arguments);
+      }
+      //下面的newValue是经过listenFn执行后的newValue
+      //之所以没有lastValue，因为本身即是literal了。
+      if (isAllDefined(newValue)) {
+        scope.$$postDigest(function(){
+          if (isAllDefined(newValue)) {
+            unwatch();
+          }
+        })
+      }
+    },
+    valueEq
+    );
+  return unwatch;
+}
+//构建输入watch代理
+function inputsWatchDelegate(scope, listenerFn, valueEq, watchFn){
+  var inputExpressions = watchFn.inputs;
+  var oldValues = _.times(inputExpressions.length, _.constant(function(){}));
+  var lastResult;
+
+  return scope.$watch(function(){
+    var changed = false;
+    _.forEach(inputExpressions, function(inputExpr, i){
+      var newValue = inputExpr(scope);
+      if (changed || !expressionInputDirtyCheck(newValue, oldValues[i])) {
+        changed = true;
+        oldValues[i] = newValue;      
+      }
+    });
+    if (changed) {
+      lastResult = watchFn(scope);
+    }
+  }, listenerFn, valueEq);
+}
+
+function expressionInputDirtyCheck(newValue, oldValue){
+  return newValue === oldValue ||
+    (typeof newValue === "number" && typeof oldValue === "number"
+      && _.isNaN(newValue) && _.isNaN(oldValue));
+}
+
+function getInputs(ast){
+  if (ast.length !== 1) {
+    return;
+  }
+  var candidate = ast[0].toWatch;
+  if (candidate.length !== 1 || candidate[0] !== ast[0]) {
+    return candidate;
+  }
+}
+
+
 
 function Parser(lexer) {
   this.lexer = lexer;
@@ -844,7 +1090,21 @@ function parse(expr) {
   }
   var lexer = new Lexer();
   var parser = new Parser(lexer);
-  return parser.parse(expr);
+  var oneTime = false;
+
+  if (expr.charAt(0) === ":" && expr.charAt(1) === ":") {
+    expr = expr.substring(2);
+    oneTime = true;
+  }
+  var parseFn = parser.parse(expr);
+  if (parseFn.constant) {
+    parseFn.$$watchDelegate = constantWatchDelegate;
+  } else if (oneTime) {
+    parseFn.$$watchDelegate = parseFn.literal ? oneTimeLiteralWatchDelegate : oneTimeWatchDelegate;
+  } else if (parseFn.inputs) {
+    parseFn.$$watchDelegate = inputsWatchDelegate;
+  }
+  return parseFn;
 }
 
 module.exports = parse;
