@@ -18,9 +18,11 @@ function createInjector(modulesToLoad, strictDi){
 			}
 			cache[key] = value;
 		},
+
 		provider: function(key, provider){
 			cache[key] = invoke(provider.$get, provider);
 		}
+		
 	};
 	function annotate(fn){
 		if (_.isArray(fn)) {
