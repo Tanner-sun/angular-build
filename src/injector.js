@@ -2,121 +2,155 @@
 
 //三种依赖注入方法：1）fn.$inject 2)['a','b',fn] 3)fn(a,b)
 var _ = require('lodash');
+
 var FN_ARGS = /^function\s*[^\(]*\(\s*([^\)]*)\)/m;
-var FN_ARG = /^\s*(_?)(\S+)\1\s*$/;
+var FN_ARG = /^\s*(_?)(\S+?)\1\s*$/;
 //注意//后的内容都会被注释掉，所以用$结尾，并且添加m属性
 var STRIP_COMMENTS = /(\/\/.*$)|(\/\*.*?\*\/)/mg;
-var INSTANTIATING = {};
-var path = [];
+var INSTANTIATING = { };
 
-function createInjector(modulesToLoad, strictDi){
-	var providerCache = {};
-	var instanceCache = {};
-	var loadModules = {};
-	strictDi = (strictDi === true);
-	var $provide = {
-		constant: function(key, value){
-			if (key === 'hasOwnProperty') {
-				throw 'hasOwnProperty is not a valid constant name!'
-			}
-			instanceCache[key] = value;
-		},
 
-		provider: function(key, provider){
-			if (_.isFunction(provider)) {
-				provider = instantiate(provider);
-			}
-			providerCache[key + 'Provider'] = invoke(provider.$get, provider);
-		}
-		
-	};
-	function getService(name) {
-		if (instanceCache.hasOwnProperty(name)) {
-			if (instanceCache[name] === INSTANTIATING) {
-				throw new Error('Circular dependency found: '+
-					name + '<-' + path.join('<-'));
-			}
-			return instanceCache[name];
-		} else if (providerCache.hasOwnProperty(name + 'Provider')) {
-			path.unshift(name);
-			instanceCache[name] = INSTANTIATING;
-			try {
-				var provider = providerCache[name + 'Provider'];
-				var instance = instanceCache[name] = invoke(provider.$get);
-				return instance;
-			} finally {
-				path.shift();
-				if (instanceCache[name] === INSTANTIATING) {
-					delete instanceCache[name];
-				}
-			}
+function createInjector(modulesToLoad, strictDi) {
+  var providerCache = {};
+  var providerInjector = providerCache.$injector =
+      createInternalInjector(providerCache, function() {
+    throw 'Unknown provider: '+path.join(' <- ');
+  });
+  var instanceCache = {};
+  var instanceInjector = instanceCache.$injector =
+      createInternalInjector(instanceCache, function(name) {
+    var provider = providerInjector.get(name + 'Provider');
+    return instanceInjector.invoke(provider.$get, provider);
+  });
+  var loadedModules = {};
+  var path = [];
+  strictDi = (strictDi === true);
 
-		}
-	}
-	function annotate(fn){
-		if (_.isArray(fn)) {
-			return fn.slice(0, fn.length -1);
-		} else if (fn.$inject) {
-			return fn.$inject;
-		//函数的length属性指的是函数形参的数目
-		} else if (!fn.length) {
-			return [];
-		} else {
-			if (strictDi) {
-				throw '“fn is not using explicit annotation and ' + 'cannot be invoked in strict mode';
-			}
-			var source = fn.toString().replace(STRIP_COMMENTS,'');
-			var argDeclaration = source.match(FN_ARGS);
-			return _.map(argDeclaration[1].split(','), function(argName){
-				return argName.replace(FN_ARG, '$2');
-			});
-		}
-	};
-	function invoke(fn, self, locals){
-		var args = _.map(annotate(fn), function(token){
-			if (_.isString(token)) {
-				return locals && locals.hasOwnProperty(token) ?
-				 locals[token] : getService(token);
-			} else {
-				throw 'Incorrect injection token! Expected a string, got' + token;
-			}
-		});
-		if (_.isArray(fn)) {
-			fn = _.last(fn);
-		}
-		return fn.apply(self, args);
-	};
-	function instantiate (Type, locals) {
+  providerCache.$provide = {
+    constant: function(key, value) {
+      if (key === 'hasOwnProperty') {
+        throw 'hasOwnProperty is not a valid constant name!';
+      }
+      providerCache[key] = value;
+      instanceCache[key] = value;
+    },
+    provider: function(key, provider) {
+      if (_.isFunction(provider)) {
+        provider = providerInjector.instantiate(provider);
+      }
+      providerCache[key + 'Provider'] = provider;
+    }
+  };
+   //函数的length属性指的是函数形参的数目
+  function annotate(fn) {
+    if (_.isArray(fn)) {
+      return fn.slice(0, fn.length - 1);
+    } else if (fn.$inject) {
+      return fn.$inject;
+    } else if (!fn.length) {
+      return [];
+    } else {
+      if (strictDi) {
+        throw 'fn is not using explicit annotation and cannot be invoked in strict mode';
+      }
+      var source = fn.toString().replace(STRIP_COMMENTS, '');
+      var argDeclaration = source.match(FN_ARGS);
+      return _.map(argDeclaration[1].split(','), function(argName) {
+        return argName.match(FN_ARG)[2];
+      });
+    }
+  }
 
-		var UnwrappedType = _.isArray(Type) ? _.last(Type) : Type;
-		//Object.create(构造函数的原型对象)用于创建一个对象，并且该对象的__proto__指向传入传入的对象
-		var instance = Object.create(UnwrappedType.prototype);
+  function createInternalInjector(cache, factoryFn) {
 
-		invoke(Type, instance, locals);
-		return instance;
-	};
-	_.forEach(modulesToLoad, function loadModule(moduleName){
-		if (!loadModules.hasOwnProperty(moduleName)){
-			loadModules[moduleName] = true;
-			var module = window.angular.module(moduleName);
-			_.forEach(module.requires, loadModule);
-			_.forEach(module._invokeQueue, function(invokeArgs){
-				var method = invokeArgs[0];
-				var args = invokeArgs[1];
-				$provide[method].apply($provide, args);
-			})
-		}
+    function getService(name) {
+      if (cache.hasOwnProperty(name)) {
+        if (cache[name] === INSTANTIATING) {
+          throw new Error('Circular dependency found: ' +
+            name + ' <- ' + path.join(' <- '));
+        }
+        return cache[name];
+      } else {
+        path.unshift(name);
+        cache[name] = INSTANTIATING;
+        try {
+          return (cache[name] = factoryFn(name));
+        } finally {
+          path.shift();
+          if (cache[name] === INSTANTIATING) {
+            delete cache[name];
+          }
+        }
+      }
+    }
 
-	})
-	return {
-		has: function(key){
-			return instanceCache.hasOwnProperty(key) ||
-				providerCache.hasOwnProperty(key + 'Provider');
-		},
-		get: getService,
-		invoke: invoke,
-		annotate: annotate,
-		instantiate: instantiate
-	};
+    function invoke(fn, self, locals) {
+      var args = _.map(annotate(fn), function(token) {
+        if (_.isString(token)) {
+          return locals && locals.hasOwnProperty(token) ?
+            locals[token] :
+            getService(token);
+        } else {
+          throw 'Incorrect injection token! Expected a string, got '+token;
+        }
+      });
+      if (_.isArray(fn)) {
+        fn = _.last(fn);
+      }
+      return fn.apply(self, args);
+    }
+
+    function instantiate(Type, locals) {
+      var UnwrappedType = _.isArray(Type) ? _.last(Type) : Type;
+      //Object.create(构造函数的原型对象)用于创建一个对象，并且该对象的__proto__指向传入传入的对象
+      var instance = Object.create(UnwrappedType.prototype);
+      invoke(Type, instance, locals);
+      return instance;
+    }
+
+    return {
+      has: function(name) {
+        return cache.hasOwnProperty(name) || providerCache.hasOwnProperty(name + 'Provider');
+      },
+      get: getService,
+      annotate: annotate,
+      invoke: invoke,
+      instantiate: instantiate
+    };
+  }
+
+  function runInvokeQueue(queue){
+    _.forEach(queue, function(invokeArgs) {
+        var service = providerInjector.get(invokeArgs[0]);
+        var method = invokeArgs[1];
+        var args = invokeArgs[2];
+        service[method].apply(service, args);
+      });
+  } 
+
+  //真正的执行函数在这里。上文都是声明
+  var runBlocks = [];
+  _.forEach(modulesToLoad, function loadModule(module) {
+    if (_.isString(module)){
+      if (!loadedModules.hasOwnProperty(moduleName)) {
+        loadedModules[moduleName] = true;
+        var module = window.angular.module(moduleName);
+        _.forEach(module.requires, loadModule);
+        runInvokeQueue(module._invokeQueue);
+        runInvokeQueue(module._configBlocks);
+        runBlocks = module._runBlocks.concat(module._runBlocks);
+      }
+    } else if (_.isFunction(module) || _.isArray(module)) {
+      runBlocks.push(providerInjector.invoke(module))
+    }
+    
+  });
+  //过滤假值 false、null、 0、""、undefined 和 NaN 都是“假值”
+  _.forEach(_.compact(runBlocks), function(runBlock){
+    instanceInjector.invoke(runBlock);
+  })
+
+  return instanceInjector;
 }
+
 module.exports = createInjector;
