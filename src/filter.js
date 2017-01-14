@@ -1,28 +1,25 @@
 'use strict';
 var _ = require('lodash');
 
-var filters = {};
-
-function register (name, factory){
+function $FilterProvider ($provide) {
+	this.register = function (name, factory){
 	
-	if (_.isObject(name)) {
-		return _.map(name, function(factory, name){
-			return register(name, factory);
-		})
-	} else {
-		var filter = factory();
-		filters[name] = filter;
-	}
-	return
-};
-
-function filter(name) {
-	return filters[name];
+		if (_.isObject(name)) {
+			return _.map(name, function(factory, name){
+				return register(name, factory);
+			})
+		} else {
+			return $provide.factory(name + 'Filter', factory);
+		}
+	};
+	this.$get = ['$injector', function($injector) {
+		return function filter(name) {
+			return $injector.get(name + 'Filter');
+		};
+	}];
+	this.register('filter', require('./filter_filter'));
 }
 
-register('filter', require('./filter_filter'))
+$FilterProvider.$inject = ['$provide']
 
-module.exports = {
-	register: register,
-	filter: filter
-}
+module.exports = $FilterProvider;

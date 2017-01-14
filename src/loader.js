@@ -9,6 +9,8 @@ function setupModuleLoader(window){
 			throw "hasOwnProperty is not a valid module name";
 		}
 		var invokeQueue = [];
+
+		//queue method
 		var invokeLater = function(service, method, arrayMethod, queue){
 			return function(){
 				queue = queue || invokeQueue;
@@ -29,6 +31,10 @@ function setupModuleLoader(window){
 				moduleInstance._runBlocks.push(fn);
 				return moduleInstance;
 			},
+			factory: invokeLater('$provide', 'factory'),
+			value: invokeLater('$provide', 'value'),
+			service: invokeLater('$provide', 'service'),
+			decorator: invokeLater('$provide', 'decorator'),
 			_invokeQueue: invokeQueue,
 			_configBlocks: configBlocks,
 			_runBlocks: []

@@ -2,6 +2,8 @@
 
 //三种依赖注入方法：1）fn.$inject 2)['a','b',fn] 3)fn(a,b)
 var _ = require('lodash');
+var HashMap = require('./hash_map').HashMap;
+var loadedModules = new HashMap();
 
 var FN_ARGS = /^function\s*[^\(]*\(\s*([^\)]*)\)/m;
 var FN_ARG = /^\s*(_?)(\S+?)\1\s*$/;
@@ -26,6 +28,16 @@ function createInjector(modulesToLoad, strictDi) {
   var path = [];
   strictDi = (strictDi === true);
 
+  function enforceReturnValue(factoryFn) {
+    return function() {
+      var value = instanceInjector.invoke(factoryFn);
+      if (_.isUndefined(value)){
+        throw 'factory must return a value'
+      }
+      return value;
+    }
+  }
+
   providerCache.$provide = {
     constant: function(key, value) {
       if (key === 'hasOwnProperty') {
@@ -39,6 +51,26 @@ function createInjector(modulesToLoad, strictDi) {
         provider = providerInjector.instantiate(provider);
       }
       providerCache[key + 'Provider'] = provider;
+    },
+    factory: function(key, factoryFn, enforce){
+      this.provider(key, {$get: enforce === false ? factoryFn : enforceReturnValue(factoryFn)});
+    },
+    value: function(key, value){
+      this.factory(key, _.constant(value), false);
+    },
+    service: function(key, Constructor){
+      this.factory(key, function(){
+        return instanceInjector.instantiate(Constructor);
+      });
+    },
+    decorator: function(serviceName, decoratorFn){
+      var provider = providerInjector.get(serviceName + 'Provider');
+      var original$get = provider.$get;
+      provider.$get = function() {
+        var instance = instanceInjector.invoke(original$get, provider);
+        instanceInjector.invoke(decoratorFn, null, {$delegate: instance});
+        return instance;
+      }
     }
   };
    //函数的length属性指的是函数形参的数目
@@ -131,19 +163,21 @@ function createInjector(modulesToLoad, strictDi) {
   //真正的执行函数在这里。上文都是声明
   var runBlocks = [];
   _.forEach(modulesToLoad, function loadModule(module) {
-    if (_.isString(module)){
-      if (!loadedModules.hasOwnProperty(moduleName)) {
-        loadedModules[moduleName] = true;
-        var module = window.angular.module(moduleName);
-        _.forEach(module.requires, loadModule);
-        runInvokeQueue(module._invokeQueue);
-        runInvokeQueue(module._configBlocks);
-        runBlocks = module._runBlocks.concat(module._runBlocks);
+    if (!loadedModules.get(module)) {
+      loadedModules.put(module, true);
+      if (_.isString(module)){
+        if (!loadedModules.hasOwnProperty(moduleName)) {
+          loadedModules[moduleName] = true;
+          var module = window.angular.module(moduleName);
+          _.forEach(module.requires, loadModule);
+          runInvokeQueue(module._invokeQueue);
+          runInvokeQueue(module._configBlocks);
+          runBlocks = module._runBlocks.concat(module._runBlocks);
+        }
+      } else if (_.isFunction(module) || _.isArray(module)) {
+        runBlocks.push(providerInjector.invoke(module))
       }
-    } else if (_.isFunction(module) || _.isArray(module)) {
-      runBlocks.push(providerInjector.invoke(module))
     }
-    
   });
   //过滤假值 false、null、 0、""、undefined 和 NaN 都是“假值”
   _.forEach(_.compact(runBlocks), function(runBlock){
