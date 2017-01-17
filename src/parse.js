@@ -1,7 +1,7 @@
 'use strict';
 
 var _ = require('lodash');
-var filter = require('./filter').filter;
+// var filter = require('./filter').filter;
 
 var ESCAPES = {'n':'\n', 'f':'\f', 'r':'\r', 't':'\t', 'v':'\v', '\'':'\'', '"':'"'};
 
@@ -556,13 +556,14 @@ AST.prototype.constants = {
   '$locals': {type: AST.LocalsExpression}
 };
 
-function ASTCompiler(astBuilder) {
+function ASTCompiler(astBuilder, $filter) {
   this.astBuilder = astBuilder;
+  this.$filter = $filter;
 }
 
 ASTCompiler.prototype.compile = function(text) {
   var ast = this.astBuilder.ast(text);
-  markConstantAndWatchExpressions(ast);
+  markConstantAndWatchExpressions(ast, this.$filter);
   this.state = {
     nextId: 0, 
     fn: {body: [],vars: []},
@@ -593,7 +594,7 @@ ASTCompiler.prototype.compile = function(text) {
     ensureSafeObject,
     ensureSafeFunction,
     ifDefined,
-    filter);
+    this.$filter);
   /* jshint +W054 */
   fn.literal = isLiteral(ast);
   fn.constant = ast.constant;
@@ -863,14 +864,14 @@ function isLiteral(ast){
           ast.body[0].type === AST.ObjectExpression);
 }
 //设置常量表达式
-function markConstantAndWatchExpressions(ast){
+function markConstantAndWatchExpressions(ast, $filter){
   var allConstants;
   var argsToWatch;
   switch (ast.type) {
     case AST.Program:
       allConstants = true;
       _.forEach(ast.body, function(expr){
-        markConstantAndWatchExpressions(expr);
+        markConstantAndWatchExpressions(expr, $filter);
         allConstants = allConstants && expr.constant;
       });
       ast.constant = allConstants;
@@ -887,7 +888,7 @@ function markConstantAndWatchExpressions(ast){
       allConstants = true;
       argsToWatch = [];
       _.forEach(ast.elements, function(element){
-        markConstantAndWatchExpressions(element);
+        markConstantAndWatchExpressions(element, $filter);
         allConstants = allConstants && element.constant;
         if (!element.constant) {
           argsToWatch.push.apply(argsToWatch, element.toWatch);
@@ -900,7 +901,7 @@ function markConstantAndWatchExpressions(ast){
       allConstants = true;
       argsToWatch = [];
       _.forEach(ast.properties, function(property){
-        markConstantAndWatchExpressions(property.value);
+        markConstantAndWatchExpressions(property.value, $filter);
         allConstants = allConstants && property.value.constant;
         if (!property.value.constant) {
           argsToWatch.push.apply(argsToWatch, property.value.toWatch);
@@ -915,18 +916,19 @@ function markConstantAndWatchExpressions(ast){
       ast.toWatch = [];
       break;
     case AST.MemberExpression:
-      markConstantAndWatchExpressions(ast.object);
+      markConstantAndWatchExpressions(ast.object, $filter);
       if (ast.computed) {
-        markConstantAndWatchExpressions(ast.property);
+        markConstantAndWatchExpressions(ast.property, $filter);
       }
       ast.constant = ast.object.constant && (!ast.computed || ast.property.constant);
       ast.toWatch = [ast];
       break;
     case AST.CallExpression:
-      allConstants = ast.filter ? true : false;
+      var stateless = ast.filter && !$filter(ast.callee.name).$stateful;
+      allConstants = stateless ? true : false;
       argsToWatch = [];
       _.forEach(ast.arguments, function(arg){
-        markConstantAndWatchExpressions(arg);
+        markConstantAndWatchExpressions(arg, $filter);
         allConstants = allConstants && arg.constant;
         if (!arg.constant) {
           argsToWatch.push.apply(argsToWatch, arg.toWatch);
@@ -936,32 +938,32 @@ function markConstantAndWatchExpressions(ast){
       ast.toWatch = ast.filter ? argsToWatch : [ast];
       break;
     case AST.AssignmentExpression:
-      markConstantAndWatchExpressions(ast.left);
-      markConstantAndWatchExpressions(ast.right);
+      markConstantAndWatchExpressions(ast.left, $filter);
+      markConstantAndWatchExpressions(ast.right, $filter);
       ast.constant = ast.left.constant && ast.right.constant;
       ast.toWatch = [ast];
       break;
     case AST.UnaryExpression:
-      markConstantAndWatchExpressions(ast.argument);
+      markConstantAndWatchExpressions(ast.argument, $filter);
       ast.constant = ast.argument.constant;
       ast.toWatch = ast.argument.toWatch;
       break;
     case AST.BinaryExpression:
-      markConstantAndWatchExpressions(ast.left);
-      markConstantAndWatchExpressions(ast.right);
+      markConstantAndWatchExpressions(ast.left, $filter);
+      markConstantAndWatchExpressions(ast.right, $filter);
       ast.constant = ast.left.constant && ast.right.constant;
       ast.toWatch = ast.left.toWatch.concat(ast.right.toWatch);
       break;
     case AST.LogicalExpression:
-      markConstantAndWatchExpressions(ast.left);
-      markConstantAndWatchExpressions(ast.right);
+      markConstantAndWatchExpressions(ast.left, $filter);
+      markConstantAndWatchExpressions(ast.right, $filter);
       ast.constant = ast.left.constant && ast.right.constant;
       ast.toWatch = [ast];
       break;
     case AST.ConditionalExpression:
-      markConstantAndWatchExpressions(ast.test);
-      markConstantAndWatchExpressions(ast.consequent);
-      markConstantAndWatchExpressions(ast.alternate);
+      markConstantAndWatchExpressions(ast.test, $filter);
+      markConstantAndWatchExpressions(ast.consequent, $filter);
+      markConstantAndWatchExpressions(ast.alternate, $filter);
       ast.constant = ast.test.constant && ast.consequent.constant && ast.alternate.constant;
       ast.toWatch = [ast];
       break;                     
@@ -1073,38 +1075,42 @@ function getInputs(ast){
 
 
 
-function Parser(lexer) {
+function Parser(lexer, $filter) {
   this.lexer = lexer;
   this.ast = new AST(this.lexer);
-  this.astCompiler = new ASTCompiler(this.ast);
+  this.astCompiler = new ASTCompiler(this.ast, $filter);
 }
 
 Parser.prototype.parse = function(text) {
   return this.astCompiler.compile(text);
 };
 
+function $ParseProvider() {
+  this.$get = ['$filter', function($filter){
+    return function(expr) {
+      if (typeof expr === "function"){
+        return expr;
+      }
+      var lexer = new Lexer();
+      var parser = new Parser(lexer, $filter);
+      var oneTime = false;
 
-function parse(expr) {
-  if (typeof expr === "function"){
-    return expr;
+      if (expr.charAt(0) === ":" && expr.charAt(1) === ":") {
+        expr = expr.substring(2);
+        oneTime = true;
+      }
+      var parseFn = parser.parse(expr);
+      if (parseFn.constant) {
+        parseFn.$$watchDelegate = constantWatchDelegate;
+      } else if (oneTime) {
+        parseFn.$$watchDelegate = parseFn.literal ? oneTimeLiteralWatchDelegate : oneTimeWatchDelegate;
+      } else if (parseFn.inputs) {
+        parseFn.$$watchDelegate = inputsWatchDelegate;
+      }
+      return parseFn;
+    }
   }
-  var lexer = new Lexer();
-  var parser = new Parser(lexer);
-  var oneTime = false;
+}];
 
-  if (expr.charAt(0) === ":" && expr.charAt(1) === ":") {
-    expr = expr.substring(2);
-    oneTime = true;
-  }
-  var parseFn = parser.parse(expr);
-  if (parseFn.constant) {
-    parseFn.$$watchDelegate = constantWatchDelegate;
-  } else if (oneTime) {
-    parseFn.$$watchDelegate = parseFn.literal ? oneTimeLiteralWatchDelegate : oneTimeWatchDelegate;
-  } else if (parseFn.inputs) {
-    parseFn.$$watchDelegate = inputsWatchDelegate;
-  }
-  return parseFn;
-}
 
-module.exports = parse;
+module.exports = $ParseProvider;

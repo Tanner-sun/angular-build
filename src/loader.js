@@ -35,6 +35,7 @@ function setupModuleLoader(window){
 			value: invokeLater('$provide', 'value'),
 			service: invokeLater('$provide', 'service'),
 			decorator: invokeLater('$provide', 'decorator'),
+			filter: invokeLater('$filterProvider', 'register'),
 			_invokeQueue: invokeQueue,
 			_configBlocks: configBlocks,
 			_runBlocks: []
