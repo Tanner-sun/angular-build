@@ -21,10 +21,28 @@ function $QProvider() {
 			return this.then(null, onRejected);
 		}
 		Promise.prototype.finally = function(callback){
-			return this.then(function() {
-				callback();
-			}, function() {
-				callback();
+			return this.then(function(value) {
+				var callbackValue = callback();
+				if (callbackValue && callbackValue.then) {
+					return callbackValue.then(function() {
+						return value;
+					});
+				} else {
+					return value;
+				}
+			}, function(rejection) {
+				var callbackValue = callback();
+				if (callbackValue && callbackValue.then) {
+					return callbackValue.then(function () {
+						var d = new Deferred();
+						d.reject(rejection);
+						return d.promise;
+					});
+				} else {
+					var d = new Deferred();
+					d.reject(rejection);
+					return d.promise;
+				}
 			});
 		}
 
