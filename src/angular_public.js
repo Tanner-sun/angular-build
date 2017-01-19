@@ -7,5 +7,7 @@ function publishExternalAPI() {
 	ngModule.provider('$parse', require('./parse'));
 	ngModule.provider('$rootScope', require('./scope'));
 	ngModule.provider('$q', require('./q'));
+	ngModule.provider('$httpBackend', require('./http_backend'));
+	ngModule.provider('$http', require('./http'));
 }
 module.exports = publishExternalAPI;
