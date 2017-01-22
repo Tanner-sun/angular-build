@@ -3,9 +3,7 @@ var _ = require('lodash');
 function $HttpProvider() {
 	this.$get = ['$httpBackend', '$q', '$rootScope',
 		function($httpBackend, $q, $rootScope) {
-			return function $http(requestConfig) {
-				var deferred = $q.defer();
-				var defaults = {
+			var defaults = this.defaults = {
 					headers: {
 						common: {
 							Accept: 'application/json, text/plain, */*'
@@ -21,6 +19,9 @@ function $HttpProvider() {
 						}
 					}
 				}
+			function $http(requestConfig) {
+				var deferred = $q.defer();
+				
 				//配置默认对象
 				var config = _.extend({
 					method: 'GET'
@@ -48,7 +49,6 @@ function $HttpProvider() {
 							config.headers
 						);
 					}
-				}
 				//检测状态
 				function isSuccess(status) {
 					return status >= 200 && status < 300
@@ -57,6 +57,8 @@ function $HttpProvider() {
 				$httpBackend(config.method, config.url, config.data, done, config.headers);
 				return deferred.promise;
 			}
+			$http.defaults = defaults;
+		return $http;	
 	}];
 }
 
